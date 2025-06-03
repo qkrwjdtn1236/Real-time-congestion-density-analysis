@@ -1,208 +1,232 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
-    <title>YOLOv8 Object Detection On Browser: TensroflowJs</title>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs/dist/tf.min.js"></script>
-
+    <title>YOLOv8 Object Detection</title>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
     <style>
-        body,
-        html {
-            height: 100%;
-            margin: 0;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }
-
-        #header {
-            position: absolute;
-            z-index: 2;
-            top: 0px;
-            width: 100%;
-            text-align: center;
-        }
-
-        #main {
-            position: relative;
-            width: 640px;
-            height: 480px;
-        }
-
-        #webcam,
-        #outputCanvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-        }
-
-        #outputCanvas {
-            z-index: 2;
-            /* Ensure canvas is on top of video */
-        }
-
-        button {
-            font-size: 20px;
-            background-color: #000;
-            color: #fff;
-            cursor: pointer;
-            position: absolute;
-            top: 95%;
-            left: 50%;
-            margin-top: -50px;
-            margin-left: -50px;
-            width: 150px;
-            height: 50px;
-        }
+      canvas {
+          display:block;
+          border: 1px solid black;
+          margin-top:10px;
+      }
+      video {
+          display:block;
+          border: 1px solid black;
+          margin-top:10px;
+      }
     </style>
 </head>
-
 <body>
-    <div id="header">
-        <h1>YOLOv8 Object Detection Example</h1>
-        <p>Serving : <code class="code">yolov8n.tfjs</code>, Size : <code class="code">640x640</code></p>
-    </div>
-    <div id="main">
-        <video id="webcam" autoplay playsinline width="640" height="480"></video>
-        <canvas id="outputCanvas"></canvas>
-    </div>
-    <button id="runInference">Run Inference</button>
+    <video id="videoElement" width="640" height="480" autoplay></video>
+    <button id="detectButton">Detect Objects</button>
+    <canvas></canvas>
     <script>
-        const classNames = {
-            0: "person",
-            1: "bicycle",
-            };
+      const videoElement = document.getElementById('videoElement');
+      const detectButton = document.getElementById('detectButton');
 
-        const TARGET_WIDTH = 640;
-        const TARGET_HEIGHT = 640;
-        let model;
-
-        async function loadModel() {
-            tf.setBackend('webgl');
-            model = await tf.loadGraphModel('./best_web_model/model.json');
-
-        }
-
-        async function runModel(tensor) {
-            if (!model) await loadModel();
-            return model.predict(tensor);
-        }
-
-        async function processWebcamFrame() {
-            const video = document.getElementById('webcam');
-            const tensor = await webcamToTensor(video);
-            // Measure inference time
-            const startTime = performance.now();
-            const predictions = await runModel(tensor);
-            const endTime = performance.now();
-            const inferenceTime = endTime - startTime;
-            console.log(`Inference Time: ${inferenceTime.toFixed(2)} ms`);
-            const detections = processPredictions(predictions, classNames);
-            await drawBoundingBoxes(video, detections);
-
-        }
-
-        function extractSelectedPredictions(indices, boxes, labels, classNames) {
-            return indices.map(i => {
-                const box = boxes.slice([i, 0], [1, -1]).squeeze().arraySync();
-                const label = labels.slice([i], [1]).arraySync()[0];
-                return { box, label: classNames[label] };
-            });
-        }
-
-        async function webcamToTensor(videoElement) {
-            const canvas = document.createElement('canvas');
-            canvas.width = TARGET_WIDTH;
-            canvas.height = TARGET_HEIGHT;
-            const ctx = canvas.getContext('2d', { willReadFrequently: true });
-
-            ctx.drawImage(videoElement, 0, 0, TARGET_WIDTH, TARGET_HEIGHT);
-            const imageData = ctx.getImageData(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
-            const tensor = tf.browser.fromPixels(imageData);
-
-            return tf.cast(tensor, 'float32').div(tf.scalar(255)).expandDims(0);
-        }
-
-        function processPredictions(predictions, classNames) {
-            return tf.tidy(() => {
-                const transRes = predictions.transpose([0, 2, 1]);
-                const boxes = calculateBoundingBoxes(transRes);
-                const [scores, labels] = calculateScoresAndLabels(transRes, classNames);
-
-                const indices = tf.image.nonMaxSuppression(boxes, scores, predictions.shape[2], 0.45, 0.2).arraySync();
-                return extractSelectedPredictions(indices, boxes, labels, classNames);
-            });
-        }
-
-        function calculateBoundingBoxes(transRes) {
-            const [xCenter, yCenter, width, height] = [
-                transRes.slice([0, 0, 0], [-1, -1, 1]),
-                transRes.slice([0, 0, 1], [-1, -1, 1]),
-                transRes.slice([0, 0, 2], [-1, -1, 1]),
-                transRes.slice([0, 0, 3], [-1, -1, 1])
-            ];
-
-            const topLeftX = tf.sub(xCenter, tf.div(width, 2));
-            const topLeftY = tf.sub(yCenter, tf.div(height, 2));
-            return tf.concat([topLeftX, topLeftY, width, height], 2).squeeze();
-        }
-
-        function calculateScoresAndLabels(transRes, classNames) {
-            const rawScores = transRes.slice([0, 0, 4], [-1, -1, Object.keys(classNames).length]).squeeze(0);
-            return [rawScores.max(1), rawScores.argMax(1)];
-        }
-
-        async function drawBoundingBoxes(imageElement, detections) {
-
-            const canvas = document.getElementById('outputCanvas');
-            const ctx = canvas.getContext('2d', { willReadFrequently: true });
-            canvas.width = imageElement.width;
-            canvas.height = imageElement.height;
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-            const resizeScale = Math.min(TARGET_WIDTH / canvas.width, TARGET_HEIGHT / canvas.height);
-            const dx = (TARGET_WIDTH - canvas.width * resizeScale) / 2;
-            const dy = (TARGET_HEIGHT - canvas.height * resizeScale) / 2;
-
-            detections.forEach(({ box, label }) => {
-                let [topLeftX, topLeftY, width, height] = box;
-                topLeftX = topLeftX / resizeScale - dx / resizeScale;
-                topLeftY = topLeftY / resizeScale - dy / resizeScale;
-                width /= resizeScale;
-                height /= resizeScale;
-
-                ctx.strokeStyle = 'red';
-                ctx.lineWidth = 2;
-                ctx.strokeRect(topLeftX, topLeftY, width, height);
-                ctx.fillStyle = 'red';
-                ctx.font = '20px Arial';
-                ctx.fillText(label, topLeftX, topLeftY - 7);
-            });
-
-        }
-
-        async function setupWebcam() {
-            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-                const video = document.getElementById('webcam');
-                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-                video.srcObject = stream;
-            } else {
-                console.error('getUserMedia is not supported');
-            }
-        }
-
-        // Start webcam processing when the DOM content is loaded
-        document.querySelector('#runInference').addEventListener('click', async () => {
-            await loadModel();
-            await setupWebcam();
-            setInterval(processWebcamFrame, 100); // Process each frame every second
+      // Get webcam feed
+      navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => {
+          videoElement.srcObject = stream;
         });
 
+      detectButton.addEventListener("click", async () => {
+          detectButton.disabled = true; // Disable button during detection
+          
+          const canvas = document.createElement("canvas");
+          canvas.width = videoElement.videoWidth;
+          canvas.height = videoElement.videoHeight;
+          const ctx = canvas.getContext("2d");
 
+          const detectFrame = async () => {
+            ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+            const imageBlob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg'));
+            const boxes = await detect_objects_on_image(imageBlob);
+            draw_image_and_boxes(imageBlob, boxes);
+            
+            requestAnimationFrame(detectFrame); // Detect objects in the next frame
+          };
+
+          detectFrame(); // Start detecting objects in frames
+      });
+
+      /**
+       * Function draws the image from provided file
+       * and bounding boxes of detected objects on
+       * top of the image
+       * @param file Uploaded file object
+       * @param boxes Array of bounding boxes in format [[x1,y1,x2,y2,object_type,probability],...]
+       */
+      function draw_image_and_boxes(file,boxes) {
+          const img = new Image()
+          img.src = URL.createObjectURL(file);
+          img.onload = () => {
+              const canvas = document.querySelector("canvas");
+              canvas.width = img.width;
+              canvas.height = img.height;
+              const ctx = canvas.getContext("2d");
+              ctx.drawImage(img,0,0);
+              ctx.strokeStyle = "#00FF00";
+              ctx.lineWidth = 3;
+              ctx.font = "18px serif";
+              boxes.forEach(([x1,y1,x2,y2,label]) => {
+                  ctx.strokeRect(x1,y1,x2-x1,y2-y1);
+                  ctx.fillStyle = "#00ff00";
+                  const width = ctx.measureText(label).width;
+                  ctx.fillRect(x1,y1,width+10,25);
+                  ctx.fillStyle = "#000000";
+                  ctx.fillText(label, x1, y1+18);
+              });
+          }
+      }
+
+      /**
+       * Function receives an image, passes it through YOLOv8 neural network
+       * and returns an array of detected objects and their bounding boxes
+       * @param buf Input image body
+       * @returns Array of bounding boxes in format [[x1,y1,x2,y2,object_type,probability],..]
+       */
+      async function detect_objects_on_image(buf) {
+          const [input,img_width,img_height] = await prepare_input(buf);
+          const output = await run_model(input);
+          return process_output(output,img_width,img_height);
+      }
+
+      /**
+       * Function used to convert input image to tensor,
+       * required as an input to YOLOv8 object detection
+       * network.
+       * @param buf Content of uploaded file
+       * @returns Array of pixels
+       */
+      async function prepare_input(buf) {
+          return new Promise(resolve => {
+              const img = new Image();
+              img.src = URL.createObjectURL(buf);
+              img.onload = () => {
+                  const [img_width,img_height] = [img.width, img.height]
+                  const canvas = document.createElement("canvas");
+                  canvas.width = 640;
+                  canvas.height = 640;
+                  const context = canvas.getContext("2d");
+                  context.drawImage(img,0,0,640,640);
+                  const imgData = context.getImageData(0,0,640,640);
+                  const pixels = imgData.data;
+
+                  const red = [], green = [], blue = [];
+                  for (let index=0; index<pixels.length; index+=4) {
+                      red.push(pixels[index]/255.0);
+                      green.push(pixels[index+1]/255.0);
+                      blue.push(pixels[index+2]/255.0);
+                  }
+                  const input = [...red, ...green, ...blue];
+                  resolve([input, img_width, img_height])
+              }
+          })
+      }
+
+// Move the model loading outside of the run_model function
+const modelPromise = ort.InferenceSession.create("best.onnx");
+
+/**
+ * Function used to pass provided input tensor to YOLOv8 neural network and return result
+ * @param input Input pixels array
+ * @returns Raw output of neural network as a flat array of numbers
+ */
+async function run_model(input) {
+    const model = await modelPromise; // Use the pre-loaded model
+    input = new ort.Tensor(Float32Array.from(input),[1, 3, 640, 640]);
+    const outputs = await model.run({images:input});
+    return outputs["output0"].data;
+}
+
+      /**
+       * Function used to convert RAW output from YOLOv8 to an array of detected objects.
+       * Each object contain the bounding box of this object, the type of object and the probability
+       * @param output Raw output of YOLOv8 network
+       * @param img_width Width of original image
+       * @param img_height Height of original image
+       * @returns Array of detected objects in a format [[x1,y1,x2,y2,object_type,probability],..]
+       */
+      function process_output(output, img_width, img_height) {
+          let boxes = [];
+          for (let index=0;index<8400;index++) {
+              const [class_id,prob] = [...Array(80).keys()]
+                  .map(col => [col, output[8400*(col+4)+index]])
+                  .reduce((accum, item) => item[1]>accum[1] ? item : accum,[0,0]);
+              if (prob < 0.5) {
+                  continue;
+              }
+              const label = yolo_classes[class_id];
+              const xc = output[index];
+              const yc = output[8400+index];
+              const w = output[2*8400+index];
+              const h = output[3*8400+index];
+              const x1 = (xc-w/2)/640*img_width;
+              const y1 = (yc-h/2)/640*img_height;
+              const x2 = (xc+w/2)/640*img_width;
+              const y2 = (yc+h/2)/640*img_height;
+              boxes.push([x1,y1,x2,y2,label,prob]);
+          }
+
+          boxes = boxes.sort((box1,box2) => box2[5]-box1[5])
+          const result = [];
+          while (boxes.length>0) {
+              result.push(boxes[0]);
+              boxes = boxes.filter(box => iou(boxes[0],box)<0.7);
+          }
+          return result;
+      }
+
+      /**
+       * Function calculates "Intersection-over-union" coefficient for specified two boxes
+       * https://pyimagesearch.com/2016/11/07/intersection-over-union-iou-for-object-detection/.
+       * @param box1 First box in format: [x1,y1,x2,y2,object_class,probability]
+       * @param box2 Second box in format: [x1,y1,x2,y2,object_class,probability]
+       * @returns Intersection over union ratio as a float number
+       */
+      function iou(box1,box2) {
+          return intersection(box1,box2)/union(box1,box2);
+      }
+
+      /**
+       * Function calculates union area of two boxes.
+       *     :param box1: First box in format [x1,y1,x2,y2,object_class,probability]
+       *     :param box2: Second box in format [x1,y1,x2,y2,object_class,probability]
+       *     :return: Area of the boxes union as a float number
+       * @param box1 First box in format [x1,y1,x2,y2,object_class,probability]
+       * @param box2 Second box in format [x1,y1,x2,y2,object_class,probability]
+       * @returns Area of the boxes union as a float number
+       */
+      function union(box1,box2) {
+          const [box1_x1,box1_y1,box1_x2,box1_y2] = box1;
+          const [box2_x1,box2_y1,box2_x2,box2_y2] = box2;
+          const box1_area = (box1_x2-box1_x1)*(box1_y2-box1_y1)
+          const box2_area = (box2_x2-box2_x1)*(box2_y2-box2_y1)
+          return box1_area + box2_area - intersection(box1,box2)
+      }
+
+      /**
+       * Function calculates intersection area of two boxes
+       * @param box1 First box in format [x1,y1,x2,y2,object_class,probability]
+       * @param box2 Second box in format [x1,y1,x2,y2,object_class,probability]
+       * @returns Area of intersection of the boxes as a float number
+       */
+      function intersection(box1,box2) {
+          const [box1_x1,box1_y1,box1_x2,box1_y2] = box1;
+          const [box2_x1,box2_y1,box2_x2,box2_y2] = box2;
+          const x1 = Math.max(box1_x1,box2_x1);
+          const y1 = Math.max(box1_y1,box2_y1);
+          const x2 = Math.min(box1_x2,box2_x2);
+          const y2 = Math.min(box1_y2,box2_y2);
+          return (x2-x1)*(y2-y1)
+      }
+
+      /**
+       * Array of YOLOv8 class labels
+       */
+      const yolo_classes = ['0','1','2','3','4','5','6','7','Person'];
     </script>
 </body>
-
 </html>
